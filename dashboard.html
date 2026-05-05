@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Crowd Energy Dashboard</title>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+
+<style>
+:root {
+    --bg1:#f4f7fb;
+    --bg2:#e9eff7;
+    --card:#ffffff;
+    --text:#1e293b;
+    --muted:#64748b;
+    --accent:#3b82f6;
+    --danger:#ef4444;
+    --success:#10b981;
+}
+body {
+    background: linear-gradient(135deg, var(--bg1), var(--bg2));
+    font-family: Inter, sans-serif;
+    padding:20px;
+}
+h1 { font-weight:700; }
+.tile {
+    background:var(--card);
+    border-radius:12px;
+    padding:18px;
+    box-shadow:0 5px 18px rgba(0,0,0,0.08);
+}
+.metric-value { font-size:1.7rem; font-weight:700; color:var(--text);}
+.metric-label { color:var(--muted); font-size:0.85rem; }
+.density-pill {
+    padding:8px 12px;
+    border-radius:30px;
+    font-weight:700;
+    color:white;
+    display:inline-block;
+}
+.dark {
+    --bg1:#0e1525;
+    --bg2:#0b111e;
+    --card:#0f1a2e;
+    --text:#e2e8f0;
+    --muted:#94a3b8;
+}
+</style>
+</head>
+<body>
+
+<div class="container-fluid">
+
+<!-- HEADER -->
+<div class="d-flex justify-content-between align-items-center flex-wrap mb-3">
+    <div>
+        <h1>Crowd Energy Dashboard</h1>
+        <div style="color:var(--muted);font-size:0.9rem;">Energy & Crowd Analytics with CNN Models</div>
+    </div>
+    <div class="d-flex gap-2 align-items-center mt-2">
+        <button id="exportJsonBtn" class="btn btn-sm btn-outline-primary">JSON</button>
+        <button id="exportCsvBtn" class="btn btn-sm btn-outline-secondary">CSV</button>
+        <button id="exportPngBtn" class="btn btn-sm btn-primary">PNG</button>
+
+        <label class="form-check form-switch ms-3">
+            <input id="darkToggle" class="form-check-input" type="checkbox">
+            <span class="ms-2">Dark Mode</span>
+        </label>
+    </div>
+</div>
+
+<!-- METRICS -->
+<div class="row g-3">
+    <div class="col-sm-6 col-md-3"><div class="tile"><div class="metric-value" id="total_energy">--</div><div class="metric-label">Total Energy (J)</div></div></div>
+    <div class="col-sm-6 col-md-3"><div class="tile"><div class="metric-value" id="avg_power">--</div><div class="metric-label">Average Power (mW)</div></div></div>
+    <div class="col-sm-6 col-md-3"><div class="tile"><div class="metric-value" id="sim_steps">--</div><div class="metric-label">Simulated Steps</div></div></div>
+    <div class="col-sm-6 col-md-3"><div class="tile"><div class="metric-value" id="cnn_steps">--</div><div class="metric-label">CNN Predicted Steps</div></div></div>
+
+    <div class="col-sm-6 col-md-3"><div class="tile"><div class="metric-value" id="people_count">--</div><div class="metric-label">Estimated People</div></div></div>
+    <div class="col-sm-6 col-md-3"><div class="tile"><div class="metric-value" id="people_variance">--</div><div class="metric-label">People Count Variance</div></div></div>
+    <div class="col-sm-6 col-md-3"><div class="tile">
+        <div id="densityPill" class="density-pill">--</div>
+        <div class="metric-label mt-1">Crowd Density</div>
+    </div></div>
+</div>
+
+<!-- CHARTS -->
+<div class="row g-3 mt-3">
+
+    <!-- LARGE POWER CHART -->
+    <div class="col-lg-8">
+        <div class="tile" style="height:350px;">
+            <canvas id="powerChart"></canvas>
+        </div>
+    </div>
+
+    <div class="col-lg-4">
+        <div class="tile mb-3" style="height:220px;">
+            <canvas id="comparisonChart"></canvas>
+        </div>
+
+        <div class="tile mb-3" style="height:220px;">
+            <canvas id="peopleTrend"></canvas>
+        </div>
+
+        <div class="tile" style="height:220px;">
+            <canvas id="peopleConfidence"></canvas>
+        </div>
+    </div>
+
+</div>
+
+</div>
+
+<script>
+/* JSON + CSV export helpers */
+function downloadObjectAsJson(obj, filename){
+    const data="data:text/json;charset=utf-8,"+encodeURIComponent(JSON.stringify(obj,null,2));
+    const a=document.createElement("a"); a.href=data; a.download=filename; a.click();
+}
+function jsonToCsv(obj){
+    const rows=[["metric","value"]];
+    for(const [k,v] of Object.entries(obj.metrics)) rows.push([k,v]);
+    const csv=rows.map(r=>r.join(",")).join("\n");
+    const blob=new Blob([csv],{type:"text/csv"});
+    const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="dashboard.csv"; a.click();
+}
+
+let charts={};
+
+async function loadDash(){
+    const data=await (await fetch("crowd_dashboard_data.json")).json();
+
+    const met=data.metrics, cnn=data.cnn_step_detection||{}, ppl=data.people_count_estimate||{};
+    document.getElementById("total_energy").innerText=met.total_energy_J.toFixed(2);
+    document.getElementById("avg_power").innerText=met.avg_power_mW.toFixed(1);
+    document.getElementById("sim_steps").innerText=met.total_footfalls;
+    document.getElementById("cnn_steps").innerText=cnn.cnn_total_steps ?? "--";
+    document.getElementById("people_count").innerText=ppl.people_est_rounded ?? "--";
+
+    const preds=ppl.per_window_preds||[];
+    const std=preds.length?Math.sqrt(preds.map(x=>(x-(ppl.people_est_float||0))**2).reduce((a,b)=>a+b,0)/preds.length):0;
+    document.getElementById("people_variance").innerText=std.toFixed(2);
+
+    // Density pill
+    const pill=document.getElementById("densityPill");
+    let d="--",c="gray";
+    if(ppl.people_est_rounded!==undefined){
+        const x=ppl.people_est_rounded;
+        if(x<=3){d="Low";c="var(--success)";}
+        else if(x<=7){d="Medium";c="var(--accent)";}
+        else{d="High";c="var(--danger)";}
+    }
+    pill.innerText=d; pill.style.background=c;
+
+    /* POWER CHART */
+    const time=data.power_time_series.time_s, pw=data.power_time_series.power_mW;
+    const stepTimes=cnn.cnn_step_timeline_s||[];
+    const markers=stepTimes.map(t=>{
+        let idx=0,min=1e9;
+        for(let i=0;i<time.length;i++){
+            const d=Math.abs(time[i]-t);
+            if(d<min){min=d;idx=i;}
+        }
+        return {x:time[idx], y:pw[idx]};
+    });
+
+    const ctx=document.getElementById("powerChart");
+    if(charts.power) charts.power.destroy();
+    charts.power=new Chart(ctx,{
+        type:"line",
+        data:{
+            labels:time,
+            datasets:[
+                {label:"Power (mW)", data:pw, borderColor:"#3b82f6", pointRadius:0, tension:0.2},
+                {type:"scatter", data:markers, pointBackgroundColor:"#ef4444", pointRadius:4}
+            ]
+        },
+        options:{
+            maintainAspectRatio:false,
+            plugins:{
+                title:{display:true,text:"Power Time-Series with CNN Step Markers"},
+                legend:{display:false}
+            },
+            scales:{
+                x:{title:{display:true,text:"Time (s)"}},
+                y:{title:{display:true,text:"Power (mW)"}}
+            }
+        }
+    });
+
+    /* STEP COMPARISON */
+    const c2=document.getElementById("comparisonChart");
+    if(charts.comp) charts.comp.destroy();
+    charts.comp=new Chart(c2,{
+        type:"bar",
+        data:{
+            labels:["Simulated","CNN"],
+            datasets:[{
+                data:[met.total_footfalls, cnn.cnn_total_steps||0],
+                backgroundColor:["#4da3ff","#ff8c4d"]
+            }]
+        },
+        options:{
+            maintainAspectRatio:false,
+            plugins:{title:{display:true,text:"Step Comparison"}},
+            scales:{y:{title:{display:true,text:"Steps"}}}
+        }
+    });
+
+    /* PEOPLE TREND */
+    const tctx=document.getElementById("peopleTrend");
+    if(charts.trend) charts.trend.destroy();
+    charts.trend=new Chart(tctx,{
+        type:"line",
+        data:{
+            labels:ppl.per_window_centers_s||[],
+            datasets:[{data:preds, borderColor:"#2563eb", pointRadius:3}]
+        },
+        options:{
+            maintainAspectRatio:false,
+            plugins:{title:{display:true,text:"People Trend"}},
+            scales:{
+                x:{title:{display:true,text:"Time (s)"}},
+                y:{title:{display:true,text:"People"}}
+            }
+        }
+    });
+
+    /* CONFIDENCE */
+    const conf=preds.map(v=>Math.abs(v-(ppl.people_est_float||0)));
+    const cc=document.getElementById("peopleConfidence");
+    if(charts.conf) charts.conf.destroy();
+    charts.conf=new Chart(cc,{
+        type:"line",
+        data:{
+            labels:ppl.per_window_centers_s||[],
+            datasets:[{data:conf,borderColor:"#dc2626",pointRadius:3}]
+        },
+        options:{
+            maintainAspectRatio:false,
+            plugins:{title:{display:true,text:"People Model Confidence"}},
+            scales:{
+                x:{title:{display:true,text:"Time (s)"}},
+                y:{title:{display:true,text:"Deviation"}}
+            }
+        }
+    });
+
+    /* EXPORTS */
+    exportJsonBtn.onclick=()=>downloadObjectAsJson(data,"dashboard.json");
+    exportCsvBtn.onclick=()=>jsonToCsv(data);
+    exportPngBtn.onclick=()=>{
+        const canvas=charts.power.canvas;
+        const link=document.createElement("a");
+        link.href=canvas.toDataURL("image/png");
+        link.download="power_chart.png";
+        link.click();
+    };
+}
+
+darkToggle.onchange=()=>document.documentElement.classList.toggle("dark");
+loadDash();
+</script>
+
+</body>
+</html>
